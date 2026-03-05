@@ -38,7 +38,8 @@ from database import (
     get_or_create_user,
     init_db,
 )
-from keep_alive import start_keep_alive
+from keep_alive import keep_alive
+import nest_asyncio
 from visualize import generate_body_weight_chart, generate_progress_chart
 
 # ── Logging ──────────────────────────────────────────────────────────────
@@ -561,12 +562,6 @@ async def progress_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 #  MAIN
 # ═════════════════════════════════════════════════════════════════════════
 
-async def post_init(application) -> None:
-    """Called after the Application is initialized — start the keep-alive server."""
-    start_keep_alive()
-    logger.info("🌐 Keep-alive web server started.")
-
-
 def main() -> None:
     """Load config, initialize the database, and start the bot."""
     load_dotenv()
@@ -578,8 +573,11 @@ def main() -> None:
             "Get one from @BotFather on Telegram."
         )
 
+    # Fix asyncio event loop conflicts with Flask thread
+    nest_asyncio.apply()
+
     init_db()
-    app = ApplicationBuilder().token(token).post_init(post_init).build()
+    app = ApplicationBuilder().token(token).build()
 
     # ── Workout logging conversation ──────────────────────────────────
     log_conv = ConversationHandler(
@@ -647,6 +645,10 @@ def main() -> None:
 
     # Fallback text workout parser
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_workout))
+
+    # Start the Flask keep-alive server (for Render deployment)
+    keep_alive()
+    logger.info("🌐 Keep-alive web server started.")
 
     logger.info("🚀 Bot is running — press Ctrl+C to stop.")
     app.run_polling(drop_pending_updates=True)

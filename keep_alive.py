@@ -1,37 +1,29 @@
 """
-keep_alive.py — Minimal web server to satisfy Render's port-binding requirement.
+keep_alive.py — Flask-based dummy web server for Render deployment.
 
-Render's free "Web Service" tier expects the app to bind to a port.
-This lightweight aiohttp server runs alongside the Telegram bot to
-prevent Render from killing the process.
+Render's free "Web Service" tier requires the app to bind to a port.
+This Flask server runs in a background daemon thread so it doesn't
+block the Telegram bot's main event loop.
 """
 
 import os
-from aiohttp import web
+from threading import Thread
+from flask import Flask
+
+app = Flask(__name__)
 
 
-async def health_check(request: web.Request) -> web.Response:
+@app.route("/")
+def health_check():
     """Simple health-check endpoint."""
-    return web.Response(text="🏋️ Workout Tracker Bot is alive!")
+    return "🏋️ Workout Tracker Bot is alive!", 200
 
 
-def start_keep_alive() -> None:
-    """
-    Start the aiohttp server in the background on the PORT env variable.
-    Must be called from an already-running asyncio event loop (e.g. via
-    Application.post_init).
-    """
-    app = web.Application()
-    app.router.add_get("/", health_check)
-
-    port = int(os.getenv("PORT", "8080"))
-    runner = web.AppRunner(app)
-
-    import asyncio
-
-    async def _start():
-        await runner.setup()
-        site = web.TCPSite(runner, "0.0.0.0", port)
-        await site.start()
-
-    asyncio.get_event_loop().create_task(_start())
+def keep_alive():
+    """Start the Flask server in a background daemon thread."""
+    port = int(os.environ.get("PORT", 8080))
+    thread = Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, use_reloader=False),
+        daemon=True,
+    )
+    thread.start()
