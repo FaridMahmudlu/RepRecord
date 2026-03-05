@@ -38,8 +38,6 @@ from database import (
     get_or_create_user,
     init_db,
 )
-from keep_alive import keep_alive
-import nest_asyncio
 from visualize import generate_body_weight_chart, generate_progress_chart
 
 # ── Logging ──────────────────────────────────────────────────────────────
@@ -573,9 +571,6 @@ def main() -> None:
             "Get one from @BotFather on Telegram."
         )
 
-    # Fix asyncio event loop conflicts with Flask thread
-    nest_asyncio.apply()
-
     init_db()
     app = ApplicationBuilder().token(token).build()
 
@@ -646,12 +641,21 @@ def main() -> None:
     # Fallback text workout parser
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text_workout))
 
-    # Start the Flask keep-alive server (for Render deployment)
-    keep_alive()
-    logger.info("🌐 Keep-alive web server started.")
+    # ── Decide: Webhook (Render) vs Polling (local) ───────────────────
+    is_render = os.environ.get("RENDER", "").lower() == "true"
 
-    logger.info("🚀 Bot is running — press Ctrl+C to stop.")
-    app.run_polling(drop_pending_updates=True)
+    if is_render:
+        port = int(os.environ.get("PORT", 8443))
+        url = os.environ.get("RENDER_EXTERNAL_URL", "")
+        logger.info("🌐 Starting webhook on port %d → %s", port, url)
+        app.run_webhook(
+            listen="0.0.0.0",
+            port=port,
+            webhook_url=url,
+        )
+    else:
+        logger.info("🚀 Bot is running locally — press Ctrl+C to stop.")
+        app.run_polling(drop_pending_updates=True)
 
 
 if __name__ == "__main__":
