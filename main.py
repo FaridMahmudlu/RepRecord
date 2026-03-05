@@ -10,6 +10,7 @@ Features:
   • Fallback: direct text like "Bench Press 3x10 80kg" still works
 """
 
+import asyncio
 import logging
 import os
 import re
@@ -562,6 +563,12 @@ async def progress_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
 def main() -> None:
     """Load config, initialize the database, and start the bot."""
+    # Fix for Python 3.14+ strict event loop rules
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        asyncio.set_event_loop(asyncio.new_event_loop())
+
     load_dotenv()
     token = os.getenv("TELEGRAM_BOT_TOKEN")
 
