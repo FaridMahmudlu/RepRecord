@@ -36,6 +36,8 @@ from database import (
     add_body_weight,
     add_workout,
     delete_workout,
+    get_last_weight,
+    get_last_workout_stat,
     get_or_create_user,
     init_db,
 )
@@ -204,7 +206,7 @@ async def log_select_muscle(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 
 
 async def log_select_exercise(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """User picked an exercise — prompt for sets/reps/weight."""
+    """User picked an exercise — prompt for sets/reps/weight with last stats."""
     query = update.callback_query
     await query.answer()
     data = query.data.removeprefix("log_ex:")
@@ -222,12 +224,24 @@ async def log_select_exercise(update: Update, context: ContextTypes.DEFAULT_TYPE
         return SELECT_MUSCLE
 
     context.user_data["exercise"] = data
-    await query.edit_message_text(
-        f"📝 *{data}*\n\n"
-        "Enter *sets*, *reps*, and *weight* (kg):\n"
-        "Example: `4 10 60`",
-        parse_mode="Markdown",
-    )
+
+    # Smart UX: show last workout stats as a reminder
+    prompt = f"📝 *{data}*\n\n"
+    try:
+        user = update.effective_user
+        user_id = get_or_create_user(user.id, user.username)
+        last = get_last_workout_stat(user_id, data)
+        if last:
+            prompt += (
+                f"💡 _Last time: {int(last['sets'])} × {int(last['reps'])} "
+                f"@ {float(last['weight_kg']):.1f} kg — try to beat it!_\n\n"
+            )
+    except Exception:
+        pass  # Don't block the flow if DB lookup fails
+
+    prompt += "Enter *sets*, *reps*, and *weight* (kg):\nExample: `4 10 60`"
+
+    await query.edit_message_text(prompt, parse_mode="Markdown")
     return ENTER_STATS
 
 
@@ -340,9 +354,9 @@ async def progress_select_exercise(update: Update, context: ContextTypes.DEFAULT
     try:
         user = update.effective_user
         user_id = get_or_create_user(user.id, user.username)
-        chart_path = generate_progress_chart(user_id, exercise)
+        chart_buf = generate_progress_chart(user_id, exercise)
 
-        if chart_path is None:
+        if chart_buf is None:
             await query.edit_message_text(
                 f"📭 No data found for *{exercise}*.\n"
                 "Log some workouts first!",
@@ -352,14 +366,11 @@ async def progress_select_exercise(update: Update, context: ContextTypes.DEFAULT
 
         await query.edit_message_text(f"📈 Generating chart for *{exercise}*…", parse_mode="Markdown")
 
-        with open(chart_path, "rb") as photo:
-            await query.message.reply_photo(
-                photo=photo,
-                caption=f"📈 Your progress for *{exercise}*",
-                parse_mode="Markdown",
-            )
-
-        os.remove(chart_path)
+        await query.message.reply_photo(
+            photo=chart_buf,
+            caption=f"📈 Your progress for *{exercise}*",
+            parse_mode="Markdown",
+        )
 
     except Exception as exc:
         logger.error("Error in progress view: %s", exc, exc_info=True)
@@ -375,18 +386,27 @@ async def progress_select_exercise(update: Update, context: ContextTypes.DEFAULT
 # ═════════════════════════════════════════════════════════════════════════
 
 async def body_weight_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Entry point: prompt user for their body weight."""
-    await update.message.reply_text(
-        "⚖️ *Log Body Weight*\n\n"
-        "Enter your current weight in kg:\n"
-        "Example: `75.5`",
-        parse_mode="Markdown",
-    )
+    """Entry point: prompt user for their body weight, showing last recorded."""
+    prompt = "⚖️ *Log Body Weight*\n\n"
+
+    # Smart UX: show last recorded weight
+    try:
+        user = update.effective_user
+        user_id = get_or_create_user(user.id, user.username)
+        last_w = get_last_weight(user_id)
+        if last_w is not None:
+            prompt += f"💡 _Your last recorded weight was: {last_w:.1f} kg_\n\n"
+    except Exception:
+        pass
+
+    prompt += "Enter your current weight in kg:\nExample: `75.5`"
+
+    await update.message.reply_text(prompt, parse_mode="Markdown")
     return ENTER_BODY_WEIGHT
 
 
 async def body_weight_enter(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    """Validate and save the body weight entry."""
+    """Validate, save, and show weight change."""
     text = update.message.text.strip()
 
     # Validate: must be a positive number
@@ -404,11 +424,25 @@ async def body_weight_enter(update: Update, context: ContextTypes.DEFAULT_TYPE) 
     try:
         user = update.effective_user
         user_id = get_or_create_user(user.id, user.username)
+
+        # Get previous weight BEFORE inserting the new one
+        prev_weight = get_last_weight(user_id)
         add_body_weight(user_id, weight)
+
+        # Build change indicator
+        change_text = ""
+        if prev_weight is not None:
+            diff = weight - prev_weight
+            if diff > 0:
+                change_text = f"\n📈 Change: *+{diff:.1f} kg*"
+            elif diff < 0:
+                change_text = f"\n📉 Change: *{diff:.1f} kg*"
+            else:
+                change_text = "\n➖ No change"
 
         await update.message.reply_text(
             f"✅ *Body weight logged!*\n\n"
-            f"⚖️ Weight: *{weight} kg*\n\n"
+            f"⚖️ Weight: *{weight} kg*{change_text}\n\n"
             f"Keep it up! 🎯",
             parse_mode="Markdown",
             reply_markup=MAIN_MENU_KB,
@@ -433,9 +467,9 @@ async def weight_chart_handler(update: Update, context: ContextTypes.DEFAULT_TYP
     try:
         user = update.effective_user
         user_id = get_or_create_user(user.id, user.username)
-        chart_path = generate_body_weight_chart(user_id)
+        chart_buf = generate_body_weight_chart(user_id)
 
-        if chart_path is None:
+        if chart_buf is None:
             await update.message.reply_text(
                 "📭 No body weight data found.\n"
                 "Use *⚖️ Log Body Weight* to start tracking!",
@@ -444,14 +478,11 @@ async def weight_chart_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             )
             return
 
-        with open(chart_path, "rb") as photo:
-            await update.message.reply_photo(
-                photo=photo,
-                caption="📈 Your body weight progression",
-                parse_mode="Markdown",
-            )
-
-        os.remove(chart_path)
+        await update.message.reply_photo(
+            photo=chart_buf,
+            caption="📈 Your body weight progression",
+            parse_mode="Markdown",
+        )
 
     except Exception as exc:
         logger.error("Error generating weight chart: %s", exc, exc_info=True)
@@ -530,9 +561,9 @@ async def progress_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
 
         user = update.effective_user
         user_id = get_or_create_user(user.id, user.username)
-        chart_path = generate_progress_chart(user_id, exercise)
+        chart_buf = generate_progress_chart(user_id, exercise)
 
-        if chart_path is None:
+        if chart_buf is None:
             await update.message.reply_text(
                 f"📭 No data found for *{exercise}*.",
                 parse_mode="Markdown",
@@ -540,14 +571,11 @@ async def progress_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -
             )
             return
 
-        with open(chart_path, "rb") as photo:
-            await update.message.reply_photo(
-                photo=photo,
-                caption=f"📈 Your progress for *{exercise.title()}*",
-                parse_mode="Markdown",
-            )
-
-        os.remove(chart_path)
+        await update.message.reply_photo(
+            photo=chart_buf,
+            caption=f"📈 Your progress for *{exercise.title()}*",
+            parse_mode="Markdown",
+        )
 
     except Exception as exc:
         logger.error("Error in /progress: %s", exc, exc_info=True)

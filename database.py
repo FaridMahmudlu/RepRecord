@@ -137,7 +137,7 @@ def delete_workout(workout_id: int) -> bool:
 
 def get_exercise_history(user_id: int, exercise_name: str) -> list[dict]:
     """
-    Fetch every logged entry for a given exercise, ordered by date.
+    Fetch ALL logged entries for a given exercise, ordered by date.
     Returns a list of dicts with keys: date, sets, reps, weight_kg.
     """
     with get_db_connection() as conn:
@@ -152,6 +152,27 @@ def get_exercise_history(user_id: int, exercise_name: str) -> list[dict]:
                 (user_id, exercise_name),
             )
             return [dict(r) for r in cursor.fetchall()]
+
+
+def get_last_workout_stat(user_id: int, exercise_name: str) -> dict | None:
+    """
+    Fetch the most recent workout entry for an exercise.
+    Returns a dict with keys: date, sets, reps, weight_kg — or None.
+    """
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT date, sets, reps, weight_kg
+                FROM workouts
+                WHERE user_id = %s AND LOWER(exercise_name) = LOWER(%s)
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (user_id, exercise_name),
+            )
+            row = cursor.fetchone()
+            return dict(row) if row else None
 
 
 # ── Body weight CRUD ─────────────────────────────────────────────────────
@@ -174,9 +195,30 @@ def add_body_weight(user_id: int, weight_kg: float) -> int:
             return row_id
 
 
+def get_last_weight(user_id: int) -> float | None:
+    """
+    Fetch the most recently recorded body weight for a user.
+    Returns the weight as a float, or None if no records exist.
+    """
+    with get_db_connection() as conn:
+        with conn.cursor(cursor_factory=RealDictCursor) as cursor:
+            cursor.execute(
+                """
+                SELECT weight_kg
+                FROM body_weight
+                WHERE user_id = %s
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (user_id,),
+            )
+            row = cursor.fetchone()
+            return float(row["weight_kg"]) if row else None
+
+
 def get_body_weight_history(user_id: int) -> list[dict]:
     """
-    Fetch all body weight entries for a user, ordered by date.
+    Fetch ALL body weight entries for a user, ordered by date.
     Returns a list of dicts with keys: date, weight_kg.
     """
     with get_db_connection() as conn:

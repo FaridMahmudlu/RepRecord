@@ -1,18 +1,16 @@
 """
 visualize.py — Thread-safe chart generation for the Workout Tracker Bot.
 
-Uses the matplotlib OO API exclusively (no pyplot global state) to avoid
-RecursionError in async/webhook environments. Backend is set to 'Agg'
-before any pyplot import.
+Uses the matplotlib OO API exclusively (NO pyplot import) to avoid
+RecursionError from PTB's deepcopy of leaked global state.
+Charts are returned as in-memory BytesIO buffers — no temp files needed.
 """
 
-import os
-import tempfile
+import io
 import threading
 
-import matplotlib
-matplotlib.use("Agg")  # MUST be before importing pyplot
-import matplotlib.pyplot as plt
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_agg import FigureCanvasAgg
 import matplotlib.dates as mdates
 import pandas as pd
 
@@ -22,12 +20,10 @@ from database import get_exercise_history, get_body_weight_history
 _chart_lock = threading.Lock()
 
 
-def generate_progress_chart(user_id: int, exercise_name: str) -> str | None:
+def generate_progress_chart(user_id: int, exercise_name: str) -> io.BytesIO | None:
     """
     Build a line chart of weight over time for the given exercise.
-    Thread-safe: only one chart is generated at a time.
-
-    Returns the absolute path to a temporary PNG, or None if no data.
+    Returns a BytesIO PNG buffer, or None if no data.
     """
     rows = get_exercise_history(user_id, exercise_name)
     if not rows:
@@ -47,9 +43,11 @@ def generate_progress_chart(user_id: int, exercise_name: str) -> str | None:
     df.sort_values("date", inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    # --- Thread-safe plot using OO API ------------------------------------
+    # --- Thread-safe plot using pure OO API --------------------------------
     with _chart_lock:
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig = Figure(figsize=(10, 6), facecolor="#FFFFFF")
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
 
         # Main line
         ax.plot(
@@ -74,8 +72,8 @@ def generate_progress_chart(user_id: int, exercise_name: str) -> str | None:
             color="#2E86AB",
         )
 
-        # Annotate each point with its weight
-        for i, row in df.iterrows():
+        # Annotate each point
+        for _, row in df.iterrows():
             ax.annotate(
                 f'{row["weight_kg"]:.1f} kg',
                 xy=(row["date"], row["weight_kg"]),
@@ -93,38 +91,31 @@ def generate_progress_chart(user_id: int, exercise_name: str) -> str | None:
                 ),
             )
 
-        # Styling
         ax.set_title(
             f"📈 Progressive Overload — {exercise_name.title()}",
-            fontsize=17,
-            fontweight="bold",
-            pad=18,
-            color="#1A1A2E",
+            fontsize=17, fontweight="bold", pad=18, color="#1A1A2E",
         )
         ax.set_xlabel("Date", fontsize=12, color="#555555")
         ax.set_ylabel("Weight (kg)", fontsize=12, color="#555555")
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
         ax.tick_params(axis="both", labelsize=10, colors="#555555")
-        ax.grid(True, linestyle="--", alpha=0.7, color="#E0E0E0")
+        ax.tick_params(axis="x", rotation=45)
+        ax.grid(True, linestyle="--", alpha=0.6, color="#E0E0E0")
         ax.set_facecolor("#FAFAFA")
-        fig.set_facecolor("#FFFFFF")
-        fig.autofmt_xdate()
         fig.tight_layout()
 
-        # Save to temp file
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        fig.savefig(tmp.name, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        # Render to in-memory buffer
+        buf = io.BytesIO()
+        canvas.print_png(buf)
+        buf.seek(0)
 
-    return tmp.name
+    return buf
 
 
-def generate_body_weight_chart(user_id: int) -> str | None:
+def generate_body_weight_chart(user_id: int) -> io.BytesIO | None:
     """
     Build a line chart of body weight over time.
-    Thread-safe: only one chart is generated at a time.
-
-    Returns the absolute path to a temporary PNG, or None if no data.
+    Returns a BytesIO PNG buffer, or None if no data.
     """
     rows = get_body_weight_history(user_id)
     if not rows:
@@ -140,9 +131,11 @@ def generate_body_weight_chart(user_id: int) -> str | None:
     df.sort_values("date", inplace=True)
     df.reset_index(drop=True, inplace=True)
 
-    # --- Thread-safe plot using OO API ------------------------------------
+    # --- Thread-safe plot using pure OO API --------------------------------
     with _chart_lock:
-        fig, ax = plt.subplots(figsize=(10, 6))
+        fig = Figure(figsize=(10, 6), facecolor="#FFFFFF")
+        canvas = FigureCanvasAgg(fig)
+        ax = fig.add_subplot(111)
 
         # Main line
         ax.plot(
@@ -168,7 +161,7 @@ def generate_body_weight_chart(user_id: int) -> str | None:
         )
 
         # Annotate each point
-        for i, row in df.iterrows():
+        for _, row in df.iterrows():
             ax.annotate(
                 f'{row["weight_kg"]:.1f} kg',
                 xy=(row["date"], row["weight_kg"]),
@@ -186,27 +179,22 @@ def generate_body_weight_chart(user_id: int) -> str | None:
                 ),
             )
 
-        # Styling
         ax.set_title(
             "⚖️ Body Weight Progression",
-            fontsize=17,
-            fontweight="bold",
-            pad=18,
-            color="#1A1A2E",
+            fontsize=17, fontweight="bold", pad=18, color="#1A1A2E",
         )
         ax.set_xlabel("Date", fontsize=12, color="#555555")
         ax.set_ylabel("Weight (kg)", fontsize=12, color="#555555")
         ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
         ax.tick_params(axis="both", labelsize=10, colors="#555555")
-        ax.grid(True, linestyle="--", alpha=0.7, color="#E0E0E0")
+        ax.tick_params(axis="x", rotation=45)
+        ax.grid(True, linestyle="--", alpha=0.6, color="#E0E0E0")
         ax.set_facecolor("#FAFAFA")
-        fig.set_facecolor("#FFFFFF")
-        fig.autofmt_xdate()
         fig.tight_layout()
 
-        # Save to temp file
-        tmp = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
-        fig.savefig(tmp.name, dpi=150, bbox_inches="tight")
-        plt.close(fig)
+        # Render to in-memory buffer
+        buf = io.BytesIO()
+        canvas.print_png(buf)
+        buf.seek(0)
 
-    return tmp.name
+    return buf
