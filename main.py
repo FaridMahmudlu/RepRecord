@@ -14,6 +14,7 @@ import asyncio
 import logging
 import os
 import re
+import traceback
 
 from dotenv import load_dotenv
 from telegram import (
@@ -385,6 +386,7 @@ async def progress_select_exercise(update: Update, context: ContextTypes.DEFAULT
 
     except Exception as exc:
         logger.error("Error in progress view: %s", exc, exc_info=True)
+        traceback.print_exc()
         await query.edit_message_text(
             "❌ Something went wrong while generating your chart."
         )
@@ -508,6 +510,7 @@ async def weight_chart_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 
     except Exception as exc:
         logger.error("Error generating weight chart: %s", exc, exc_info=True)
+        traceback.print_exc()
         await update.message.reply_text(
             "❌ Something went wrong while generating the chart.",
             reply_markup=MAIN_MENU_KB,

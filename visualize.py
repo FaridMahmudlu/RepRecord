@@ -1,18 +1,19 @@
 """
 visualize.py — Thread-safe chart generation for the Workout Tracker Bot.
 
-Uses the matplotlib OO API (Figure + FigureCanvasAgg) with aggressive cleanup
-to prevent RecursionError from PTB's deepcopy of leaked matplotlib state.
+Uses ONLY the matplotlib OO API (Figure + FigureCanvasAgg).
+No pyplot import — this prevents RecursionError caused by PTB's deepcopy
+of leaked matplotlib global state in the webhook/async environment.
 
 Charts are returned as raw bytes — never Figure, Axes, or BytesIO objects.
 """
 
 import io
+import traceback
 import threading
 
 import matplotlib
-matplotlib.use("Agg")  # MUST be before pyplot
-import matplotlib.pyplot as plt
+matplotlib.use("Agg")  # Non-interactive backend (MUST be before any mpl imports)
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import matplotlib.dates as mdates
@@ -24,43 +25,59 @@ from database import get_exercise_history, get_body_weight_history
 _chart_lock = threading.Lock()
 
 
+def _render_chart(fig: Figure, canvas: FigureCanvasAgg) -> bytes:
+    """Render a Figure to PNG bytes and clean up. Helper to avoid duplication."""
+    try:
+        buf = io.BytesIO()
+        canvas.print_png(buf)
+        png_bytes = buf.getvalue()
+        buf.close()
+        return png_bytes
+    finally:
+        # OO-only cleanup — no pyplot interaction at all
+        for ax in fig.axes:
+            ax.clear()
+        fig.clear()
+        del canvas
+
+
 def generate_progress_chart(user_id: int, exercise_name: str) -> bytes | None:
     """
     Build a line chart of weight over time for the given exercise.
-    Returns raw PNG bytes, or None if no data.
+    Returns raw PNG bytes, or None if no data / insufficient data.
     """
-    rows = get_exercise_history(user_id, exercise_name)
-    if not rows:
-        return None
+    try:
+        rows = get_exercise_history(user_id, exercise_name)
+        if not rows:
+            return None
 
-    # --- Build a DataFrame with explicit Python types ---------------------
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"])
-    df["weight_kg"] = df["weight_kg"].astype(float)
-    df["sets"] = df["sets"].astype(int)
-    df["reps"] = df["reps"].astype(int)
+        # --- Build a DataFrame with explicit Python types ---------------------
+        df = pd.DataFrame(rows)
+        df["date"] = pd.to_datetime(df["date"])
+        df["weight_kg"] = df["weight_kg"].astype(float)
+        df["sets"] = df["sets"].astype(int)
+        df["reps"] = df["reps"].astype(int)
 
-    # If multiple entries on the same day, keep the heaviest weight
-    df = df.groupby("date", as_index=False).agg(
-        {"weight_kg": "max", "sets": "max", "reps": "max"}
-    )
-    df.sort_values("date", inplace=True)
-    df.reset_index(drop=True, inplace=True)
+        # If multiple entries on the same day, keep the heaviest weight
+        df = df.groupby("date", as_index=False).agg(
+            {"weight_kg": "max", "sets": "max", "reps": "max"}
+        )
+        df.sort_values("date", inplace=True)
+        df.reset_index(drop=True, inplace=True)
 
-    # Guard: need at least 2 points to draw a meaningful chart
-    if len(df) < 2:
-        return None
+        # Guard: need at least 2 points to draw a meaningful chart
+        if len(df) < 2:
+            return None
 
-    dates = df["date"].values
-    values = df["weight_kg"].values
+        dates = df["date"].tolist()
+        values = df["weight_kg"].tolist()
 
-    # --- Thread-safe plot with aggressive cleanup -------------------------
-    with _chart_lock:
-        fig = Figure(figsize=(10, 6), facecolor="#FFFFFF")
-        canvas = FigureCanvasAgg(fig)
-        ax = fig.add_subplot(111)
+        # --- Thread-safe plot (pure OO API, no pyplot) ----------------------
+        with _chart_lock:
+            fig = Figure(figsize=(10, 6), facecolor="#FFFFFF")
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
 
-        try:
             # Main line
             ax.plot(
                 dates, values,
@@ -74,7 +91,7 @@ def generate_progress_chart(user_id: int, exercise_name: str) -> bytes | None:
             ax.fill_between(dates, values, alpha=0.08, color="#2E86AB")
 
             # Annotate each point
-            for i in range(len(df)):
+            for i in range(len(dates)):
                 ax.annotate(
                     f'{values[i]:.1f} kg',
                     xy=(dates[i], values[i]),
@@ -97,55 +114,48 @@ def generate_progress_chart(user_id: int, exercise_name: str) -> bytes | None:
             ax.set_facecolor("#FAFAFA")
             fig.tight_layout()
 
-            # Render to raw bytes
-            buf = io.BytesIO()
-            canvas.print_png(buf)
-            chart_bytes = buf.getvalue()
-            buf.close()
+            return _render_chart(fig, canvas)
 
-            return chart_bytes
-
-        finally:
-            # AGGRESSIVE CLEANUP: prevent any state from leaking
-            ax.clear()
-            fig.clear()
-            plt.close(fig)
-            del ax, fig, canvas
+    except Exception:
+        print("=== ERROR in generate_progress_chart ===")
+        traceback.print_exc()
+        print("========================================")
+        return None
 
 
 def generate_body_weight_chart(user_id: int) -> bytes | None:
     """
     Build a line chart of body weight over time.
-    Returns raw PNG bytes, or None if no data.
+    Returns raw PNG bytes, or None if no data / insufficient data.
     """
-    rows = get_body_weight_history(user_id)
-    if not rows:
-        return None
+    try:
+        rows = get_body_weight_history(user_id)
+        if not rows:
+            return None
 
-    # --- Build a DataFrame with explicit Python types ---------------------
-    df = pd.DataFrame(rows)
-    df["date"] = pd.to_datetime(df["date"])
-    df["weight_kg"] = df["weight_kg"].astype(float)
+        # --- Build a DataFrame with explicit Python types ---------------------
+        df = pd.DataFrame(rows)
+        df["date"] = pd.to_datetime(df["date"])
+        df["weight_kg"] = df["weight_kg"].astype(float)
 
-    # If multiple entries on the same day, keep the latest
-    df = df.groupby("date", as_index=False).agg({"weight_kg": "last"})
-    df.sort_values("date", inplace=True)
-    df.reset_index(drop=True, inplace=True)
+        # If multiple entries on the same day, keep the latest
+        df = df.groupby("date", as_index=False).agg({"weight_kg": "last"})
+        df.sort_values("date", inplace=True)
+        df.reset_index(drop=True, inplace=True)
 
-    # Guard: need at least 2 points to draw a meaningful chart
-    if len(df) < 2:
-        return None
+        # Guard: need at least 2 points to draw a meaningful chart
+        if len(df) < 2:
+            return None
 
-    dates = df["date"].values
-    values = df["weight_kg"].values
+        dates = df["date"].tolist()
+        values = df["weight_kg"].tolist()
 
-    # --- Thread-safe plot with aggressive cleanup -------------------------
-    with _chart_lock:
-        fig = Figure(figsize=(10, 6), facecolor="#FFFFFF")
-        canvas = FigureCanvasAgg(fig)
-        ax = fig.add_subplot(111)
+        # --- Thread-safe plot (pure OO API, no pyplot) ----------------------
+        with _chart_lock:
+            fig = Figure(figsize=(10, 6), facecolor="#FFFFFF")
+            canvas = FigureCanvasAgg(fig)
+            ax = fig.add_subplot(111)
 
-        try:
             # Main line
             ax.plot(
                 dates, values,
@@ -159,7 +169,7 @@ def generate_body_weight_chart(user_id: int) -> bytes | None:
             ax.fill_between(dates, values, alpha=0.08, color="#27AE60")
 
             # Annotate each point
-            for i in range(len(df)):
+            for i in range(len(dates)):
                 ax.annotate(
                     f'{values[i]:.1f} kg',
                     xy=(dates[i], values[i]),
@@ -182,17 +192,10 @@ def generate_body_weight_chart(user_id: int) -> bytes | None:
             ax.set_facecolor("#FAFAFA")
             fig.tight_layout()
 
-            # Render to raw bytes
-            buf = io.BytesIO()
-            canvas.print_png(buf)
-            chart_bytes = buf.getvalue()
-            buf.close()
+            return _render_chart(fig, canvas)
 
-            return chart_bytes
-
-        finally:
-            # AGGRESSIVE CLEANUP: prevent any state from leaking
-            ax.clear()
-            fig.clear()
-            plt.close(fig)
-            del ax, fig, canvas
+    except Exception:
+        print("=== ERROR in generate_body_weight_chart ===")
+        traceback.print_exc()
+        print("============================================")
+        return None
