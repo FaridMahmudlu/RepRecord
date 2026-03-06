@@ -8,12 +8,37 @@ of leaked matplotlib global state in the webhook/async environment.
 Charts are returned as raw bytes — never Figure, Axes, or BytesIO objects.
 """
 
+import copy as _copy_module
 import io
 import traceback
 import threading
 
 import matplotlib
 matplotlib.use("Agg")  # Non-interactive backend (MUST be before any mpl imports)
+
+# ── Fix matplotlib 3.10.x + Python 3.14 incompatibility ─────────────────
+# Path.__deepcopy__ calls copy.deepcopy(super(), memo) which causes infinite
+# recursion: each super() proxy has a unique id(), defeating memo dedup.
+import matplotlib.path as _mpath
+
+
+def _patched_path_deepcopy(self, memo):
+    """Fixed Path.__deepcopy__ — bypasses the broken super() call."""
+    if id(self) in memo:
+        return memo[id(self)]
+    cls = type(self)
+    result = cls(
+        _copy_module.deepcopy(self.vertices, memo),
+        _copy_module.deepcopy(self.codes, memo) if self.codes is not None else None,
+    )
+    memo[id(self)] = result
+    result._readonly = False
+    return result
+
+
+_mpath.Path.__deepcopy__ = _patched_path_deepcopy
+# ─────────────────────────────────────────────────────────────────────────
+
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import matplotlib.dates as mdates
