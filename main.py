@@ -36,6 +36,8 @@ from database import (
     add_body_weight,
     add_workout,
     delete_workout,
+    get_all_weight_history,
+    get_exercise_history,
     get_last_weight,
     get_last_workout_stat,
     get_or_create_user,
@@ -354,6 +356,15 @@ async def progress_select_exercise(update: Update, context: ContextTypes.DEFAULT
     try:
         user = update.effective_user
         user_id = get_or_create_user(user.id, user.username)
+
+        # Safety check: need at least 2 data points before plotting
+        history = get_exercise_history(user_id, exercise)
+        if not history or len(history) < 2:
+            await query.edit_message_text(
+                "Not enough data to draw a chart yet. Keep logging this exercise!"
+            )
+            return ConversationHandler.END
+
         chart_buf = generate_progress_chart(user_id, exercise)
 
         if chart_buf is None:
@@ -463,10 +474,21 @@ async def body_weight_enter(update: Update, context: ContextTypes.DEFAULT_TYPE) 
 # ═════════════════════════════════════════════════════════════════════════
 
 async def weight_chart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Generate and send the body weight progression chart."""
+    """Generate and send the body weight progression chart (dedicated handler)."""
     try:
         user = update.effective_user
         user_id = get_or_create_user(user.id, user.username)
+
+        # Check data sufficiency BEFORE calling matplotlib
+        history = get_all_weight_history(user_id)
+        if not history or len(history) < 2:
+            await update.message.reply_text(
+                "Not enough data to draw a chart yet. "
+                "Please log your weight at least twice!",
+                reply_markup=MAIN_MENU_KB,
+            )
+            return
+
         chart_buf = generate_body_weight_chart(user_id)
 
         if chart_buf is None:
@@ -490,6 +512,12 @@ async def weight_chart_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             "❌ Something went wrong while generating the chart.",
             reply_markup=MAIN_MENU_KB,
         )
+
+
+async def weight_chart_fallback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Wrapper for weight_chart_handler when triggered as a ConversationHandler fallback."""
+    await weight_chart_handler(update, context)
+    return ConversationHandler.END
 
 
 # ═════════════════════════════════════════════════════════════════════════
@@ -656,7 +684,11 @@ def main() -> None:
                 MessageHandler(filters.TEXT & ~filters.COMMAND, body_weight_enter),
             ],
         },
-        fallbacks=[CommandHandler("cancel", log_cancel)],
+        fallbacks=[
+            CommandHandler("cancel", log_cancel),
+            # Prevent "📈 Weight Chart" from being consumed as weight input
+            MessageHandler(filters.Regex("^📈 Weight Chart$"), weight_chart_fallback),
+        ],
         per_message=False,
     )
 

@@ -47,6 +47,10 @@ def generate_progress_chart(user_id: int, exercise_name: str) -> bytes | None:
     df.sort_values("date", inplace=True)
     df.reset_index(drop=True, inplace=True)
 
+    # Guard: need at least 2 points to draw a meaningful chart
+    if len(df) < 2:
+        return None
+
     dates = df["date"].values
     values = df["weight_kg"].values
 
@@ -127,6 +131,10 @@ def generate_body_weight_chart(user_id: int) -> bytes | None:
     df = df.groupby("date", as_index=False).agg({"weight_kg": "last"})
     df.sort_values("date", inplace=True)
     df.reset_index(drop=True, inplace=True)
+
+    # Guard: need at least 2 points to draw a meaningful chart
+    if len(df) < 2:
+        return None
 
     dates = df["date"].values
     values = df["weight_kg"].values

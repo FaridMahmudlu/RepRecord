@@ -233,3 +233,21 @@ def get_body_weight_history(user_id: int) -> list[dict]:
                 (user_id,),
             )
             return [dict(r) for r in cursor.fetchall()]
+
+
+def get_all_weight_history(user_id: int) -> list[dict]:
+    """Alias for get_body_weight_history — used by the weight chart handler."""
+    return get_body_weight_history(user_id)
+
+
+def get_workout_progress(
+    user_id: int, exercise_name: str
+) -> tuple[list[str], list[float]]:
+    """
+    Return (dates, weights) as two clean, aligned lists.
+    Uses fetchall() internally and converts each value explicitly.
+    """
+    rows = get_exercise_history(user_id, exercise_name)
+    dates = [str(r["date"]) for r in rows]
+    values = [float(r["weight_kg"]) for r in rows]
+    return dates, values
