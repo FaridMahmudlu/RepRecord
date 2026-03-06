@@ -2,8 +2,7 @@
 visualize.py — Thread-safe chart generation for the Workout Tracker Bot.
 
 Uses ONLY the matplotlib OO API (Figure + FigureCanvasAgg).
-No pyplot import — this prevents RecursionError caused by PTB's deepcopy
-of leaked matplotlib global state in the webhook/async environment.
+No pyplot import — prevents RecursionError in PTB's webhook environment.
 
 Charts are returned as raw bytes — never Figure, Axes, or BytesIO objects.
 """
@@ -42,6 +41,8 @@ _mpath.Path.__deepcopy__ = _patched_path_deepcopy
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_agg import FigureCanvasAgg
 import matplotlib.dates as mdates
+import matplotlib.ticker as mticker
+import numpy as np
 import pandas as pd
 
 from database import get_exercise_history, get_body_weight_history
@@ -49,9 +50,25 @@ from database import get_exercise_history, get_body_weight_history
 # Lock to serialize chart generation (matplotlib is not thread-safe)
 _chart_lock = threading.Lock()
 
+# ── Design tokens ────────────────────────────────────────────────────────
+_BG_COLOR = "#1A1A2E"
+_CARD_COLOR = "#16213E"
+_GRID_COLOR = "#2A2A4A"
+_TEXT_COLOR = "#E0E0E0"
+_SUBTLE_TEXT = "#8888AA"
+
+_ACCENT_BLUE = "#00D2FF"
+_ACCENT_ORANGE = "#FF6B35"
+_ACCENT_GREEN = "#00E676"
+_ACCENT_RED = "#FF5252"
+_ACCENT_PURPLE = "#BB86FC"
+
+_GRADIENT_BLUE = "#0A1628"
+_GRADIENT_GREEN = "#0A2818"
+
 
 def _render_chart(fig: Figure, canvas: FigureCanvasAgg) -> bytes:
-    """Render a Figure to PNG bytes and clean up. Helper to avoid duplication."""
+    """Render a Figure to PNG bytes and clean up."""
     try:
         buf = io.BytesIO()
         canvas.print_png(buf)
@@ -59,86 +76,123 @@ def _render_chart(fig: Figure, canvas: FigureCanvasAgg) -> bytes:
         buf.close()
         return png_bytes
     finally:
-        # OO-only cleanup — no pyplot interaction at all
         for ax in fig.axes:
             ax.clear()
         fig.clear()
         del canvas
 
 
+def _style_ax(ax, title: str) -> None:
+    """Apply dark-themed styling to an axes object."""
+    ax.set_facecolor(_CARD_COLOR)
+    ax.set_title(
+        title,
+        fontsize=16, fontweight="bold", pad=16,
+        color=_TEXT_COLOR, loc="left",
+    )
+    ax.tick_params(axis="both", labelsize=9, colors=_SUBTLE_TEXT)
+    ax.tick_params(axis="x", rotation=40)
+    ax.grid(True, linestyle="--", alpha=0.3, color=_GRID_COLOR)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.spines["left"].set_color(_GRID_COLOR)
+    ax.spines["bottom"].set_color(_GRID_COLOR)
+
+
 def generate_progress_chart(user_id: int, exercise_name: str) -> bytes | None:
     """
-    Build a line chart of weight over time for the given exercise.
-    Returns raw PNG bytes, or None if no data / insufficient data.
+    Build a chart of weight over time for the given exercise.
+    Shows ALL individual entries (not grouped).
+    Returns raw PNG bytes, or None if insufficient data.
     """
     try:
         rows = get_exercise_history(user_id, exercise_name)
-        if not rows:
+        if not rows or len(rows) < 2:
             return None
 
-        # --- Build a DataFrame with explicit Python types ---------------------
-        df = pd.DataFrame(rows)
-        df["date"] = pd.to_datetime(df["date"])
-        df["weight_kg"] = df["weight_kg"].astype(float)
-        df["sets"] = df["sets"].astype(int)
-        df["reps"] = df["reps"].astype(int)
-
-        # If multiple entries on the same day, keep the heaviest weight
-        df = df.groupby("date", as_index=False).agg(
-            {"weight_kg": "max", "sets": "max", "reps": "max"}
+        # Build DataFrame — use .assign() to avoid chained-assignment warnings
+        df = (
+            pd.DataFrame(rows)
+            .assign(
+                date=lambda d: pd.to_datetime(d["date"]),
+                weight_kg=lambda d: d["weight_kg"].astype(float),
+                sets=lambda d: d["sets"].astype(int),
+                reps=lambda d: d["reps"].astype(int),
+            )
+            .sort_values("date")
+            .reset_index(drop=True)
         )
-        df.sort_values("date", inplace=True)
-        df.reset_index(drop=True, inplace=True)
-
-        # Guard: need at least 2 points to draw a meaningful chart
-        if len(df) < 2:
-            return None
 
         dates = df["date"].tolist()
-        values = df["weight_kg"].tolist()
+        weights = df["weight_kg"].tolist()
+        sets_list = df["sets"].tolist()
+        reps_list = df["reps"].tolist()
 
-        # --- Thread-safe plot (pure OO API, no pyplot) ----------------------
         with _chart_lock:
-            fig = Figure(figsize=(10, 6), facecolor="#FFFFFF")
+            fig = Figure(figsize=(10, 6), facecolor=_BG_COLOR, dpi=120)
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
 
-            # Main line
+            _style_ax(ax, f"Progressive Overload  --  {exercise_name.title()}")
+
+            # Main line with gradient fill
             ax.plot(
-                dates, values,
-                marker="o", linestyle="-", color="#2E86AB",
-                linewidth=2.5, markersize=8,
-                markerfacecolor="#F18F01", markeredgecolor="#FFFFFF",
+                dates, weights,
+                marker="o", linestyle="-", color=_ACCENT_BLUE,
+                linewidth=2.5, markersize=7,
+                markerfacecolor=_ACCENT_ORANGE, markeredgecolor=_BG_COLOR,
                 markeredgewidth=1.5, zorder=3,
             )
+            ax.fill_between(dates, weights, alpha=0.12, color=_ACCENT_BLUE)
 
-            # Fill area under the curve
-            ax.fill_between(dates, values, alpha=0.08, color="#2E86AB")
-
-            # Annotate each point
+            # Annotate every point with weight + sets x reps
             for i in range(len(dates)):
+                label = f"{weights[i]:.1f}kg\n{sets_list[i]}x{reps_list[i]}"
                 ax.annotate(
-                    f'{values[i]:.1f} kg',
-                    xy=(dates[i], values[i]),
+                    label,
+                    xy=(dates[i], weights[i]),
                     textcoords="offset points", xytext=(0, 14),
-                    ha="center", fontsize=9, fontweight="bold", color="#2E86AB",
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
-                              edgecolor="#2E86AB", alpha=0.8),
+                    ha="center", fontsize=7, fontweight="bold",
+                    color=_ACCENT_BLUE,
+                    bbox=dict(
+                        boxstyle="round,pad=0.25",
+                        facecolor=_BG_COLOR, edgecolor=_ACCENT_BLUE,
+                        alpha=0.85,
+                    ),
                 )
 
-            ax.set_title(
-                f"📈 Progressive Overload — {exercise_name.title()}",
-                fontsize=17, fontweight="bold", pad=18, color="#1A1A2E",
-            )
-            ax.set_xlabel("Date", fontsize=12, color="#555555")
-            ax.set_ylabel("Weight (kg)", fontsize=12, color="#555555")
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-            ax.tick_params(axis="both", labelsize=10, colors="#555555")
-            ax.tick_params(axis="x", rotation=45)
-            ax.grid(True, linestyle="--", alpha=0.7, color="#E0E0E0")
-            ax.set_facecolor("#FAFAFA")
-            fig.tight_layout()
+            # Trend line
+            if len(dates) >= 3:
+                x_num = mdates.date2num(dates)
+                z = np.polyfit(x_num, weights, 1)
+                p = np.poly1d(z)
+                ax.plot(
+                    dates, p(x_num),
+                    linestyle="--", color=_ACCENT_PURPLE,
+                    linewidth=1.5, alpha=0.6, zorder=2,
+                    label="Trend",
+                )
+                ax.legend(
+                    loc="upper left", fontsize=8,
+                    facecolor=_CARD_COLOR, edgecolor=_GRID_COLOR,
+                    labelcolor=_TEXT_COLOR,
+                )
 
+            ax.set_xlabel("Date", fontsize=10, color=_SUBTLE_TEXT, labelpad=8)
+            ax.set_ylabel("Weight (kg)", fontsize=10, color=_SUBTLE_TEXT, labelpad=8)
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+
+            # Add min/max summary
+            min_w, max_w = min(weights), max(weights)
+            diff = max_w - min_w
+            summary = f"Min: {min_w:.1f}kg  |  Max: {max_w:.1f}kg  |  Range: {diff:.1f}kg"
+            fig.text(
+                0.5, 0.01, summary,
+                ha="center", fontsize=9, color=_SUBTLE_TEXT,
+                style="italic",
+            )
+
+            fig.tight_layout(rect=[0, 0.04, 1, 1])
             return _render_chart(fig, canvas)
 
     except Exception:
@@ -150,73 +204,106 @@ def generate_progress_chart(user_id: int, exercise_name: str) -> bytes | None:
 
 def generate_body_weight_chart(user_id: int) -> bytes | None:
     """
-    Build a line chart of body weight over time.
-    Returns raw PNG bytes, or None if no data / insufficient data.
+    Build a chart of body weight over time.
+    Shows ALL individual entries (not grouped).
+    Returns raw PNG bytes, or None if insufficient data.
     """
     try:
         rows = get_body_weight_history(user_id)
-        if not rows:
+        if not rows or len(rows) < 2:
             return None
 
-        # --- Build a DataFrame with explicit Python types ---------------------
-        df = pd.DataFrame(rows)
-        df["date"] = pd.to_datetime(df["date"])
-        df["weight_kg"] = df["weight_kg"].astype(float)
-
-        # If multiple entries on the same day, keep the latest
-        df = df.groupby("date", as_index=False).agg({"weight_kg": "last"})
-        df.sort_values("date", inplace=True)
-        df.reset_index(drop=True, inplace=True)
-
-        # Guard: need at least 2 points to draw a meaningful chart
-        if len(df) < 2:
-            return None
+        # Build DataFrame — use .assign() to avoid chained-assignment warnings
+        df = (
+            pd.DataFrame(rows)
+            .assign(
+                date=lambda d: pd.to_datetime(d["date"]),
+                weight_kg=lambda d: d["weight_kg"].astype(float),
+            )
+            .sort_values("date")
+            .reset_index(drop=True)
+        )
 
         dates = df["date"].tolist()
-        values = df["weight_kg"].tolist()
+        weights = df["weight_kg"].tolist()
 
-        # --- Thread-safe plot (pure OO API, no pyplot) ----------------------
         with _chart_lock:
-            fig = Figure(figsize=(10, 6), facecolor="#FFFFFF")
+            fig = Figure(figsize=(10, 6), facecolor=_BG_COLOR, dpi=120)
             canvas = FigureCanvasAgg(fig)
             ax = fig.add_subplot(111)
 
+            _style_ax(ax, "Body Weight Progression")
+
             # Main line
             ax.plot(
-                dates, values,
-                marker="o", linestyle="-", color="#27AE60",
-                linewidth=2.5, markersize=8,
-                markerfacecolor="#E74C3C", markeredgecolor="#FFFFFF",
+                dates, weights,
+                marker="o", linestyle="-", color=_ACCENT_GREEN,
+                linewidth=2.5, markersize=7,
+                markerfacecolor=_ACCENT_RED, markeredgecolor=_BG_COLOR,
                 markeredgewidth=1.5, zorder=3,
             )
+            ax.fill_between(dates, weights, alpha=0.12, color=_ACCENT_GREEN)
 
-            # Fill area under the curve
-            ax.fill_between(dates, values, alpha=0.08, color="#27AE60")
-
-            # Annotate each point
+            # Annotate every point
             for i in range(len(dates)):
+                # Show change from previous
+                change_str = ""
+                if i > 0:
+                    diff = weights[i] - weights[i - 1]
+                    arrow = "+" if diff >= 0 else ""
+                    change_str = f"\n{arrow}{diff:.1f}"
+
+                label = f"{weights[i]:.1f}kg{change_str}"
                 ax.annotate(
-                    f'{values[i]:.1f} kg',
-                    xy=(dates[i], values[i]),
+                    label,
+                    xy=(dates[i], weights[i]),
                     textcoords="offset points", xytext=(0, 14),
-                    ha="center", fontsize=9, fontweight="bold", color="#27AE60",
-                    bbox=dict(boxstyle="round,pad=0.2", facecolor="white",
-                              edgecolor="#27AE60", alpha=0.8),
+                    ha="center", fontsize=7, fontweight="bold",
+                    color=_ACCENT_GREEN,
+                    bbox=dict(
+                        boxstyle="round,pad=0.25",
+                        facecolor=_BG_COLOR, edgecolor=_ACCENT_GREEN,
+                        alpha=0.85,
+                    ),
                 )
 
-            ax.set_title(
-                "⚖️ Body Weight Progression",
-                fontsize=17, fontweight="bold", pad=18, color="#1A1A2E",
-            )
-            ax.set_xlabel("Date", fontsize=12, color="#555555")
-            ax.set_ylabel("Weight (kg)", fontsize=12, color="#555555")
-            ax.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
-            ax.tick_params(axis="both", labelsize=10, colors="#555555")
-            ax.tick_params(axis="x", rotation=45)
-            ax.grid(True, linestyle="--", alpha=0.7, color="#E0E0E0")
-            ax.set_facecolor("#FAFAFA")
-            fig.tight_layout()
+            # Trend line
+            if len(dates) >= 3:
+                x_num = mdates.date2num(dates)
+                z = np.polyfit(x_num, weights, 1)
+                p = np.poly1d(z)
+                ax.plot(
+                    dates, p(x_num),
+                    linestyle="--", color=_ACCENT_PURPLE,
+                    linewidth=1.5, alpha=0.6, zorder=2,
+                    label="Trend",
+                )
+                ax.legend(
+                    loc="upper left", fontsize=8,
+                    facecolor=_CARD_COLOR, edgecolor=_GRID_COLOR,
+                    labelcolor=_TEXT_COLOR,
+                )
 
+            ax.set_xlabel("Date", fontsize=10, color=_SUBTLE_TEXT, labelpad=8)
+            ax.set_ylabel("Weight (kg)", fontsize=10, color=_SUBTLE_TEXT, labelpad=8)
+            ax.xaxis.set_major_formatter(mdates.DateFormatter("%Y-%m-%d"))
+
+            # Summary stats
+            first_w, last_w = weights[0], weights[-1]
+            total_change = last_w - first_w
+            arrow = "+" if total_change >= 0 else ""
+            summary = (
+                f"Start: {first_w:.1f}kg  |  "
+                f"Current: {last_w:.1f}kg  |  "
+                f"Change: {arrow}{total_change:.1f}kg"
+            )
+            fig.text(
+                0.5, 0.01, summary,
+                ha="center", fontsize=9, color=_SUBTLE_TEXT,
+                style="italic",
+            )
+
+            fig.tight_layout(rect=[0, 0.04, 1, 1])
             return _render_chart(fig, canvas)
 
     except Exception:
